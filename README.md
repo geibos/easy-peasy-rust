@@ -28,6 +28,104 @@ Then let your IDE run clippy, or run it yourself:
 cargo clippy --workspace --all-targets
 ```
 
+## Example
+
+Code that compiles fine with default lints, where `read_primary` and `read_replica` are any `fn() -> Vec<u8>`:
+
+```rust
+use std::thread;
+
+pub struct Header {
+    pub id: u16,
+    pub code: u8,
+    pub count: u16,
+}
+
+pub fn parse(buf: &[u8]) -> Option<Header> {
+    if buf.len() < 8 {
+        return None;
+    }
+    let flags = u16::from_be_bytes([buf[2], buf[3]]);
+    Some(Header {
+        id: u16::from_be_bytes([buf[0], buf[1]]),
+        code: (flags & 0x000F) as u8,
+        count: u16::from_be_bytes([buf[6], buf[7]]),
+    })
+}
+
+fn main() {
+    let results = thread::scope(|s| {
+        let a = s.spawn(read_primary);
+        let b = s.spawn(read_replica);
+        [a.join().expect("a panicked"), b.join().expect("b panicked")]
+    });
+    for h in results.iter().filter_map(|r| parse(r)) {
+        println!("{} {} {}", h.id, h.code, h.count);
+    }
+}
+```
+
+With the preset, `cargo clippy` fails. Among the hits:
+
+- `indexing_slicing` (deny): `buf[2]` panics if the length check drifts
+- `expect_used` (deny): a panicked thread becomes a second panic
+- `as_conversions`: `as u8` truncates silently
+- `print_stdout`: `println!` panics on a closed pipe
+- `min_ident_chars`, `disallowed_names`: `s`, `a`, `b`, `h`, `r`, `id`, `results`
+- `missing_docs`, `must_use_candidate`, `missing_copy_implementations`: a `pub` item owes docs, `#[must_use]` and `Copy`
+
+The same code with the preset:
+
+```rust
+use std::io::{Result as IoResult, Write as _, stdout};
+use std::panic::resume_unwind;
+use std::thread;
+
+const HEADER_LEN: usize = 8;
+const CODE_MASK: u8 = 0x0F;
+
+struct Header {
+    request_id: u16,
+    code: u8,
+    count: u16,
+}
+
+fn parse(buf: &[u8]) -> Option<Header> {
+    let header: &[u8; HEADER_LEN] = buf.first_chunk()?;
+    let [id_high, id_low, _, flags_low, _, _, count_high, count_low] = *header;
+    Some(Header {
+        request_id: u16::from_be_bytes([id_high, id_low]),
+        code: flags_low & CODE_MASK,
+        count: u16::from_be_bytes([count_high, count_low]),
+    })
+}
+
+fn main() -> IoResult<()> {
+    let replies = thread::scope(|scope| {
+        [scope.spawn(read_primary), scope.spawn(read_replica)].map(|worker| {
+            worker
+                .join()
+                .unwrap_or_else(|payload| resume_unwind(payload))
+        })
+    });
+    let mut out = stdout().lock();
+    for header in replies.iter().filter_map(|reply| parse(reply)) {
+        let Header {
+            request_id,
+            code,
+            count,
+        } = header;
+        writeln!(out, "{request_id} {code} {count}")?;
+    }
+    Ok(())
+}
+```
+
+- The header is destructured from `first_chunk`: no indexes, no casts, a short buffer is `None`
+- `resume_unwind` passes a thread's panic on instead of adding one
+- Output goes to a `stdout()` handle, and a write error returns from `main`
+- Names say what they hold, and private items need no docs
+
 ## Rules
 
 Every lint pick is explained in [`lints.toml`](rules/lints.toml) and [`clippy.toml`](rules/clippy.toml).
