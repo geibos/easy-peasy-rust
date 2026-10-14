@@ -28,6 +28,59 @@ Then let your IDE run clippy, or run it yourself:
 cargo clippy --workspace --all-targets
 ```
 
+## Example
+
+Code that passes default lints, where `read_primary` and `read_replica` are any `fn() -> Vec<u8>`:
+
+```rust
+use std::thread;
+
+pub fn fetch_codes() -> Vec<u8> {
+    let results = thread::scope(|s| {
+        let a = s.spawn(read_primary);
+        let b = s.spawn(read_replica);
+        [a.join().expect("a panicked"), b.join().expect("b panicked")]
+    });
+    results
+        .iter()
+        .filter(|r| r.len() > 3)
+        .map(|r| r[3] & 0x0F)
+        .collect()
+}
+```
+
+With the preset, `cargo clippy` fails. Among the hits:
+
+- `indexing_slicing` (deny): `r[3]` panics if the length check drifts
+- `expect_used` (deny): a panicked thread becomes a second panic
+- `min_ident_chars`, `disallowed_names`: `s`, `a`, `b`, `r`, `results`
+- `missing_docs`, `must_use_candidate`: a `pub` item owes docs and `#[must_use]`
+
+`easy-peasy` would force you to write like:
+
+```rust
+use std::panic::resume_unwind;
+use std::thread;
+
+/// Result codes of the replies long enough to have one.
+#[must_use]
+pub fn fetch_codes() -> Vec<u8> {
+    let replies = thread::scope(|scope| {
+        let workers = [scope.spawn(read_primary), scope.spawn(read_replica)];
+        workers.map(|worker| {
+            worker
+                .join()
+                .unwrap_or_else(|payload| resume_unwind(payload))
+        })
+    });
+    replies
+        .iter()
+        .filter_map(|reply| reply.get(3))
+        .map(|flags| flags & 0x0F)
+        .collect()
+}
+```
+
 ## Rules
 
 Every lint pick is explained in [`lints.toml`](rules/lints.toml) and [`clippy.toml`](rules/clippy.toml).
