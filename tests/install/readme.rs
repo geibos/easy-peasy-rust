@@ -2,7 +2,7 @@ use std::fs;
 
 use tempfile::TempDir;
 
-use super::{clippy_is_silent, install};
+use super::{clippy_is_silent, install, project};
 
 const README: &str = include_str!("../../README.md");
 
@@ -18,9 +18,10 @@ fn read_replica() -> Vec<u8> {
 
 /// Rust blocks of the README example: the original, then the fixed code.
 fn example() -> Vec<&'static str> {
-    let (_, rest) = README.split_once("\n## Example\n").unwrap();
-    let (section, _) = rest.split_once("\n## ").unwrap();
-    section
+    README
+        .split("\n## ")
+        .find_map(|section| section.strip_prefix("Example\n"))
+        .unwrap()
         .split("```rust\n")
         .skip(1)
         .map(|block| block.split_once("```").unwrap().0)
@@ -28,13 +29,7 @@ fn example() -> Vec<&'static str> {
 }
 
 fn crate_with(code: &str) -> TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join("src")).unwrap();
-    fs::write(
-        dir.path().join("Cargo.toml"),
-        "[package]\nname = \"example\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    )
-    .unwrap();
+    let dir = project("root-package");
     fs::write(
         dir.path().join("src/lib.rs"),
         format!("//! Example.\n\n{code}{READS}"),
